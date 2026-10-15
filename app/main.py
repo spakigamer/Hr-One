@@ -512,7 +512,7 @@ async def late_leaderboard(
         pipeline.append({"$match": {"emp.department": department}})
 
     pipeline.extend([
-        {"$project": {"_id": 0, "emp_code": "$_id", "name": "$emp.name", "department": "$emp.department", "total_late_minutes": 1, "late_count": 1}},
+        {"$project": {"emp_code": "$_id", "name": "$emp.name", "department": "$emp.department", "total_late_minutes": 1, "late_count": 1}},
         {"$sort": {"total_late_minutes": -1, "emp_code": 1}},
     ])
 
@@ -520,13 +520,22 @@ async def late_leaderboard(
     raw_items = await cursor.to_list(length=None)
 
     items = []
-    rank = 1
     for i, it in enumerate(raw_items):
-        if i > 0 and it["total_late_minutes"] != raw_items[i - 1]["total_late_minutes"]:
-            rank = i + 1
-        if rank > limit:
-            break
-        items.append({"rank": rank, **it})
+        if i > 0 and it["total_late_minutes"] == raw_items[i - 1]["total_late_minutes"]:
+            curr_rank = raw_items[i - 1]["rank"]
+        else:
+            curr_rank = i + 1
+        it["rank"] = curr_rank
+
+        if curr_rank <= limit:
+            items.append({
+                "rank": curr_rank,
+                "emp_code": it["emp_code"],
+                "name": it["name"],
+                "department": it["department"],
+                "total_late_minutes": it["total_late_minutes"],
+                "late_count": it["late_count"],
+            })
 
     return {"month": month, "items": items}
 
@@ -700,7 +709,7 @@ async def explain_endpoint(
         if department:
             pipeline.append({"$match": {"emp.department": department}})
         pipeline.extend([
-            {"$project": {"_id": 0, "emp_code": "$_id", "name": "$emp.name", "department": "$emp.department", "total_late_minutes": 1, "late_count": 1}},
+            {"$project": {"emp_code": "$_id", "name": "$emp.name", "department": "$emp.department", "total_late_minutes": 1, "late_count": 1}},
             {"$sort": {"total_late_minutes": -1, "emp_code": 1}},
         ])
         explain_doc = await db.command("explain", {"aggregate": "attendance_logs", "pipeline": pipeline, "cursor": {}}, verbosity="executionStats")
