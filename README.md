@@ -24,10 +24,12 @@ A high-performance asynchronous REST API for employee attendance tracking, regul
 ## Quickstart
 
 ### 1. Requirements
+
 - Python 3.10+
 - MongoDB 6.0+ (running locally on port 27017 or via Atlas)
 
 ### 2. Setup Virtual Environment
+
 ```bash
 python -m venv .venv
 # Windows:
@@ -39,23 +41,30 @@ pip install -r requirements.txt
 ```
 
 ### 3. Environment Configuration
+
 Create a local `.env` file (not committed to version control):
+
 ```env
 MONGO_URI=mongodb://localhost:27017
 MONGO_DB=hr_attendance
 ```
 
 ### 4. Seed Database
+
 Seed the initial sample dataset (employees and sample attendance records):
+
 ```bash
 python sample_seed.py
 ```
 
 ### 5. Run the API Server
+
 ```bash
 uvicorn app.main:app --port 8000 --reload
 ```
+
 Interactive API documentation will be available at:
+
 - Swagger UI: `http://localhost:8000/docs`
 - OpenAPI JSON: `http://localhost:8000/openapi.json`
 
