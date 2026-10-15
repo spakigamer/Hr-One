@@ -34,6 +34,7 @@ from helpers import (
     compute_overtime,
     compute_work_hours,
     compute_half_day,
+    get_month_date_range,
     get_working_days_in_month,
     format_attendance_record,
     format_employee,
@@ -215,13 +216,6 @@ async def list_attendance(
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
-    emp_code = emp_code if isinstance(emp_code, str) else None
-    date_from = date_from if isinstance(date_from, str) else None
-    date_to = date_to if isinstance(date_to, str) else None
-    status = status if isinstance(status, str) else None
-    page = page if isinstance(page, int) else 1
-    page_size = page_size if isinstance(page_size, int) else 20
-
     if date_from and date_to and date_from > date_to:
         raise HTTPException(422, "date_from cannot be greater than date_to")
 
@@ -310,31 +304,20 @@ async def regularize_attendance(
 
         target_late_minutes = compute_late_minutes(target_punch_in.astimezone(IST), emp.get("shift_start", "09:30"), date)
 
-    # Check for actual changes
-    changes = {}
-    old_status = rec.get("status")
-    old_in = rec.get("punch_in")
-    old_out = rec.get("punch_out")
-    old_wh = rec.get("work_hours")
-    old_lm = rec.get("late_minutes", 0)
-    old_ot = rec.get("overtime_minutes", 0)
-    old_hd = rec.get("half_day", False)
-
-    if old_status != new_status:
-        changes["status"] = {"from": old_status, "to": new_status}
-    if old_in != target_punch_in:
-        changes["punch_in"] = {"from": old_in, "to": target_punch_in}
-    if old_out != target_punch_out:
-        changes["punch_out"] = {"from": old_out, "to": target_punch_out}
-    if old_wh != target_work_hours:
-        changes["work_hours"] = {"from": old_wh, "to": target_work_hours}
-    if old_lm != target_late_minutes:
-        changes["late_minutes"] = {"from": old_lm, "to": target_late_minutes}
-    if old_ot != target_overtime_minutes:
-        changes["overtime_minutes"] = {"from": old_ot, "to": target_overtime_minutes}
-    if old_hd != target_half_day:
-        changes["half_day"] = {"from": old_hd, "to": target_half_day}
-
+    new_values = {
+        "status": new_status,
+        "punch_in": target_punch_in,
+        "punch_out": target_punch_out,
+        "work_hours": target_work_hours,
+        "late_minutes": target_late_minutes,
+        "overtime_minutes": target_overtime_minutes,
+        "half_day": target_half_day,
+    }
+    changes = {
+        k: {"from": rec.get(k), "to": v}
+        for k, v in new_values.items()
+        if rec.get(k) != v
+    }
     if not changes:
         raise HTTPException(422, "Request changes nothing")
 
@@ -346,25 +329,12 @@ async def regularize_attendance(
         "changes": changes,
     }
 
-    if "history" not in rec or not rec.get("history"):
-        history_match = {"$or": [{"history": {"$exists": False}}, {"history": {"$size": 0}}]}
-    else:
-        history_match = {"history": {"$size": len(rec["history"])}}
+    h_len = len(rec.get("history") or [])
+    history_match = {"history": {"$size": h_len}} if h_len else {"$or": [{"history": {"$exists": False}}, {"history": {"$size": 0}}]}
 
     updated = await db.attendance_logs.find_one_and_update(
         {"_id": rec["_id"], **history_match},
-        {
-            "$set": {
-                "status": new_status,
-                "punch_in": target_punch_in,
-                "punch_out": target_punch_out,
-                "work_hours": target_work_hours,
-                "late_minutes": target_late_minutes,
-                "overtime_minutes": target_overtime_minutes,
-                "half_day": target_half_day,
-            },
-            "$push": {"history": history_entry},
-        },
+        {"$set": new_values, "$push": {"history": history_entry}},
         return_document=ReturnDocument.AFTER,
     )
     if not updated:
@@ -383,11 +353,7 @@ async def employee_monthly(
     if not emp:
         raise HTTPException(404, "Employee not found")
 
-    year, m = map(int, month.split("-"))
-    num_days = calendar.monthrange(year, m)[1]
-    month_start = f"{month}-01"
-    month_end = f"{month}-{num_days:02d}"
-
+    month_start, month_end = get_month_date_range(month)
     working_days = get_working_days_in_month(month, emp["joined_on"])
 
     pipeline = [
@@ -439,11 +405,7 @@ async def department_summary(
     department: Optional[str] = None,
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
-    year, m = map(int, month.split("-"))
-    num_days = calendar.monthrange(year, m)[1]
-    month_start = f"{month}-01"
-    month_end = f"{month}-{num_days:02d}"
-
+    month_start, month_end = get_month_date_range(month)
     match_stage = {"joined_on": {"$lte": month_end}}
     if department:
         match_stage["department"] = department
@@ -538,10 +500,7 @@ async def late_leaderboard(
     department: Optional[str] = None,
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
-    year, m = map(int, month.split("-"))
-    num_days = calendar.monthrange(year, m)[1]
-    month_start = f"{month}-01"
-    month_end = f"{month}-{num_days:02d}"
+    month_start, month_end = get_month_date_range(month)
 
     pipeline = [
         {"$match": {"date": {"$gte": month_start, "$lte": month_end}, "late_minutes": {"$gt": 0}}},
@@ -630,16 +589,10 @@ async def department_trend(
             "attendance_rate": att_rate,
         }
 
-        # 7-day moving average over preceding non-null rates in range
-        window_start_idx = max(0, len(items) - 6)
-        window_rates = [it["attendance_rate"] for it in items[window_start_idx:] if it["attendance_rate"] is not None]
+        rates = [it["attendance_rate"] for it in items[-6:] if it["attendance_rate"] is not None]
         if att_rate is not None:
-            window_rates.append(att_rate)
-
-        if window_rates:
-            row["moving_avg_7d"] = round_half_up(sum(window_rates) / len(window_rates), 4)
-        else:
-            row["moving_avg_7d"] = None
+            rates.append(att_rate)
+        row["moving_avg_7d"] = round_half_up(sum(rates) / len(rates), 4) if rates else None
 
         items.append(row)
         curr += timedelta(days=1)
@@ -674,7 +627,6 @@ async def explain_endpoint(
     page = page if isinstance(page, int) else 1
     page_size = page_size if isinstance(page_size, int) else 20
     limit = limit if isinstance(limit, int) else 10
-
     if endpoint == "attendance_list":
         q = {}
         if emp_code:
@@ -695,20 +647,16 @@ async def explain_endpoint(
     elif endpoint == "employee_monthly":
         if not emp_code or not month:
             raise HTTPException(422, "emp_code and month are required for employee_monthly")
-        year, m = map(int, month.split("-"))
-        num_days = calendar.monthrange(year, m)[1]
-        pipeline = [
-            {"$match": {"emp_code": emp_code, "date": {"$gte": f"{month}-01", "$lte": f"{month}-{num_days:02d}"}}}
-        ]
+        m_start, m_end = get_month_date_range(month)
+        pipeline = [{"$match": {"emp_code": emp_code, "date": {"$gte": m_start, "$lte": m_end}}}]
         explain_doc = await db.command("explain", {"aggregate": "attendance_logs", "pipeline": pipeline, "cursor": {}}, verbosity="executionStats")
         return {"endpoint": endpoint, "collection": "attendance_logs", "explain": explain_doc}
 
     elif endpoint == "department_summary":
         if not month:
             raise HTTPException(422, "month is required for department_summary")
-        year, m = map(int, month.split("-"))
-        num_days = calendar.monthrange(year, m)[1]
-        match_q = {"joined_on": {"$lte": f"{month}-{num_days:02d}"}}
+        m_start, m_end = get_month_date_range(month)
+        match_q = {"joined_on": {"$lte": m_end}}
         if department:
             match_q["department"] = department
         pipeline = [
@@ -723,8 +671,8 @@ async def explain_endpoint(
                                 "$expr": {
                                     "$and": [
                                         {"$eq": ["$emp_code", "$$emp"]},
-                                        {"$gte": ["$date", f"{month}-01"]},
-                                        {"$lte": ["$date", f"{month}-{num_days:02d}"]},
+                                        {"$gte": ["$date", m_start]},
+                                        {"$lte": ["$date", m_end]},
                                     ]
                                 }
                             }
@@ -742,10 +690,9 @@ async def explain_endpoint(
     elif endpoint == "late_leaderboard":
         if not month:
             raise HTTPException(422, "month is required for late_leaderboard")
-        year, m = map(int, month.split("-"))
-        num_days = calendar.monthrange(year, m)[1]
+        m_start, m_end = get_month_date_range(month)
         pipeline = [
-            {"$match": {"date": {"$gte": f"{month}-01", "$lte": f"{month}-{num_days:02d}"}, "late_minutes": {"$gt": 0}}},
+            {"$match": {"date": {"$gte": m_start, "$lte": m_end}, "late_minutes": {"$gt": 0}}},
             {"$group": {"_id": "$emp_code", "total_late_minutes": {"$sum": "$late_minutes"}, "late_count": {"$sum": 1}}},
             {"$lookup": {"from": "employees", "localField": "_id", "foreignField": "emp_code", "as": "emp"}},
             {"$unwind": "$emp"},

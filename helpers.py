@@ -76,6 +76,13 @@ def compute_half_day(work_hours: Optional[float]) -> bool:
     return bool(work_hours is not None and work_hours < 4.50)
 
 
+def get_month_date_range(month: str) -> tuple[str, str]:
+    """Return ISO strings for the first and last day of a month (YYYY-MM)."""
+    year, m = map(int, month.split("-"))
+    num_days = calendar.monthrange(year, m)[1]
+    return f"{month}-01", f"{month}-{num_days:02d}"
+
+
 def get_working_days_in_month(month: str, joined_on: str) -> int:
     """R7: Working days (Mon-Fri) from joined_on to end of month."""
     year, m = map(int, month.split("-"))
